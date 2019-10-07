@@ -1,0 +1,112 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+require 5.010;
+use feature qw( switch );
+no warnings 'experimental::smartmatch';
+
+use Term::ANSIColor qw( colored );
+use Data::Dumper;
+use Logger::Syslog;
+
+my $working_dir = "/opt/service_monitor";
+BEGIN {
+	push @INC, "/opt/service_monitor";
+}
+use SEuMail;
+
+logger_prefix("situational-awareness-scan: ");
+notice("Script starting.");
+
+open PID, ">/tmp/scan.pid.run" or die colored("Couldn't write to the PID file: $!", "bold red");
+print "$$\n";
+close PID or die colored("Couldn't close PID file: $!", "bold red");
+
+my $net = $ARGV[0];
+if ((!defined($net)) || ($net eq '')) {
+	print colored("Please specify a network to scan.\n", "red");
+	error("No network specififed.  Quitting.");
+	exit 254;
+} else {
+	if (($net ne '10') && ($net ne '172')) {
+		print colored("Unrecognized network.  Expected \"10\" or \"172\".\n", "red");
+		error("Unrecognized network specified.  Quitting.");
+		exit 253;
+	}
+}
+
+my $proto = $ARGV[1];
+if ((!defined($proto)) || ($proto eq '')) {
+	print colored("Please specify a protocol to scan.\n", "red");
+	error("Protocol/service to scan not specified.  Quitting.");
+	exit 255;
+}
+
+my $MASSCAN = "/opt/masscan/bin/masscan";
+my $NMAP = "/opt/nmap/nmap";
+my $EXCL_FILE = "$working_dir/${net}_exclusions.txt";
+
+my $date_str = time();
+
+my $scan_cmd = '';
+given ($proto) {
+	when ("ftp")	{ $scan_cmd = "$MASSCAN -p21"; }
+	when ("http")	{ $scan_cmd = "$MASSCAN -p80,8000,8080"; }
+	when ("https")	{ $scan_cmd = "$MASSCAN -p443,8443"; }
+	when ("mssql")	{ $scan_cmd	= "$MASSCAN -p1433"; }
+	when ("mysql")	{ $scan_cmd = "$MASSCAN -p3306"; }
+	when ("pclpjl")	{ $scan_cmd = "$MASSCAN -p9100"; }
+	when ("rdp")	{ $scan_cmd = "$MASSCAN -p3389"; }
+	when ("rsh")	{ $scan_cmd = "$MASSCAN -p514"; }
+	when ("smtp")	{ $scan_cmd = "$MASSCAN -p25"; }
+	when ("ssh")	{ $scan_cmd = "$MASSCAN -p22"; }
+	when ("telnet")	{ $scan_cmd = "$MASSCAN -p23"; }
+	when ("vnc")	{ $scan_cmd = "$MASSCAN -p5800,5900-5910"; }
+	when ("vpn")	{ $scan_cmd = "$MASSCAN -p1701,1723"; }
+	default 		{ 
+		print STDERR colored("Protocol specification unrecognized, or not specified.\n", "red"); 
+		error("Protocol/service to scan not recognized or not specified.  Quitting."); 
+		exit 127; 
+	}
+}
+
+if ($net eq "10") {
+	$scan_cmd .= " --adapter-ip 172.16.100.183 --router-mac 00:1b:17:00:01:25 -oX $working_dir/$proto/${net}_${proto}_${date_str}.xml --excludefile $EXCL_FILE --max-rate 10000 ${net}.0.0.0/8";
+} elsif ($net eq "172") {
+	$scan_cmd .= " --adapter-ip 172.16.100.183 --router-mac 00:1b:17:00:01:25 -oX $working_dir/$proto/${net}_${proto}_${date_str}.xml --excludefile $EXCL_FILE --max-rate 10000 ${net}.16.0.0/12";
+} else {
+	error("Unrecognized net: $net ");
+	die "Unrecognized net: $net .";
+}
+
+my $to = "rapid7\@sempra.com";
+my $from = "cheselton\@semprautilities.com";
+my $source = '172.16.100.183';
+my $engine = 'masscan';
+my $target = '';
+if ($net eq '10') {
+	$target = "10.0.0.0/8";
+} elsif ($net eq '172') {
+	$target = "172.16.0.0/12";
+} else {
+	error("Unexpected target in mail config: $net ");
+	die "Unexpected target in mail config: $net";
+}
+
+#notice("Sending pre-scan email notification.");
+my $start = localtime();
+#SEuMail::send_scan_notice($to, $from, $target, $source, $engine, $start);
+
+notice("Starting scan of protocol $proto on network $target from 172.16.100.183.");
+print "CMD: $scan_cmd\n";
+my $rtv = system("sudo $scan_cmd");
+print "RTV: $rtv\n";
+notice("Scan of protocol $proto on network $target from 172.16.100.183 is complete.");
+
+#notice("Sending post-scan email notification.");
+my $end_time = localtime();
+#SEuMail::send_scan_complete($to, $from, $target, $source, $engine, $end_time);
+
+unlink("/tmp/scan.pid.run") or die colored("Couldn't delete PID file: $!", "bold red");
+notice("Script complete.");

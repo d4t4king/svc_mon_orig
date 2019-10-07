@@ -1,0 +1,100 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use Term::ANSIColor;
+use Data::Dumper;
+use XML::Simple;
+use File::Find;
+use Digest::SHA qw( sha256_hex );
+use Getopt::Long;
+use POSIX qw( strftime );
+
+my $working_dir = "/opt/service_monitor";
+
+BEGIN{
+	push @INC, $working_dir;
+}
+
+my %to_bool = ( "0" =>  "false", "1"    =>  "true");
+our @files_2_process;
+our ($verbose);
+my %times;
+my $total_diff = 0;
+my $total_elapsed = 0;
+my $total_hosts = 0;
+my $first_time = 0;
+my $last_time = 0;
+
+GetOptions(
+	"v|verbose+"	=>	\$verbose,
+);
+
+find(\&wanted, $working_dir);
+
+print "Found ".scalar(@files_2_process)." files to process.\n";
+#print Dumper(\@files_2_process);
+
+foreach my $file ( sort @files_2_process ) {
+	my %data = (
+		'start'		=>	'',
+		'end'		=>	'',
+		'elapsed'	=>	'',
+		'diff'		=>	''
+	);
+	print colored("FILE: $file \n", "cyan") if ($verbose);
+	my $xml = XMLin($file);
+	my $file_id = sha256_hex($file);
+	print colored("SHA256: $file_id \n", "magenta") if ($verbose);
+	#print Dumper($xml);
+	print "START:		$xml->{'start'} \n";
+	#my $start = $xml->{'start'};
+	$data{'start'} = $xml->{'start'};
+	if ($first_time != 0) {
+		if ($data{'start'} < $first_time) { $first_time = $data{'start'}; }
+	} else { $first_time = $data{'start'}; }
+	print "END:		$xml->{'runstats'}{'finished'}{'time'} \n";
+	#my $end = $xml->{'runstats'}{'finished'}{'time'};
+	$data{'end'} = $xml->{'runstats'}{'finished'}{'time'};
+	if ($last_time != 0) {
+		if ($data{'end'} > $last_time) { $last_time = $data{'end'}; }
+	} else { $last_time = $data{'end'}; }
+	#my $diff = $end - $start;
+	$data{'diff'} = $data{'end'} - $data{'start'};
+	print "DIFF:		$data{'diff'} \n";
+	print "ELAPSED:	$xml->{'runstats'}{'finished'}{'elapsed'} \n";
+	$data{'elapsed'} = $xml->{'runstats'}{'finished'}{'elapsed'};
+	$times{$file_id} = \%data;
+	$total_diff += $data{'diff'};
+	$total_elapsed += $data{'elapsed'};
+	$total_hosts += $xml->{'runstats'}{'hosts'}{'total'};
+	#last;
+}
+
+END {
+	print Dumper(\%times);
+	print "First:	$first_time	(".localtime($first_time).") \n";
+	print "Last:	$last_time	(".localtime($last_time).") \n";
+	if ($total_elapsed < 86400) {
+		print "Total Elapsed:	"; print strftime("\%H:\%M:\%S \n", gmtime($total_elapsed));
+	} else { 
+		warn colored("Total elapsed is greater than 1 day. ($total_elapsed) ", "bold red");
+	}
+	if ($total_diff < 86400) {
+		print "Total Diff:	"; print strftime("\%H:\%M:\%S \n", gmtime($total_diff));
+	} else {
+		warn colored("Total diff is greater than 1 day. ($total_diff) ", "bold red");
+	} 
+	print "Total hosts:	$total_hosts \n";
+	my $diff_avg = $total_diff / $total_hosts;
+	print "Average time per host: "; printf "%7.4f \n", $diff_avg;
+}
+
+sub wanted() {
+	if ((! -z $File::Find::name ) && ($File::Find::name =~ /\.xml$/)) {
+		my ($name, $ext) = split(/\./);
+		#print STDERR colored("Name: $name \n", "red");
+		push @files_2_process, $File::Find::name;
+	}
+}

@@ -1,0 +1,153 @@
+#!/usr/bin/perl -w
+
+use warnings;
+use strict;
+use Term::ANSIColor;
+use Getopt::Long qw( :config no_ignore_case bundling );
+use DBI;
+use POSIX qw( strftime floor );
+use Data::Dumper;
+
+my ($help, $verbose, $service, $detailed, $chart);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+	's|service=s'	=>	\$service,
+	'd|detailed'	=>	\$detailed,
+	'c|chart'		=>	\$chart,
+);
+
+if ($help) { &usage(); }
+
+my $database = "stores.db";
+my ($sql, $stmt);
+my @services;
+my $db = DBI->connect("dbi:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+if ($service) {
+	if ($detailed) {
+		$sql = "SELECT * FROM times WHERE script_args='$service';";
+		$stmt = $db->prepare($sql) or die $DBI::errstr;
+		$stmt->execute() or die $DBI::errstr;
+		while (my @row = $stmt->fetchrow_array()) {
+			my $rec_time = localtime($row[1]);
+			my $start = localtime($row[4]);
+			my $end = localtime($row[5]);
+			print <<EoS;
+
+ID:				$row[0]
+RECORD TIME:			$rec_time
+SCRIPT:				$row[2]
+SCRIPT ARGS:			$row[3]
+START:				$start
+END:				$end
+EoS
+
+			print "DURATION:\t\t\t".&to_time($row[6])."\n";
+			print "ATOM AVERAGE:\t\t\t".sprintf("%-.4f", $row[7])." seconds \n";
+		}
+	} else {
+		$sql = "SELECT diff FROM times WHERE script_args='$service';";
+		$stmt = $db->prepare($sql) or die $DBI::errstr;
+		$stmt->execute() or die $DBI::errstr;
+		my $total = 0; my $count = 0;
+		while (my @row = $stmt->fetchrow_array()) {
+			$total += $row[0];
+			$count++;
+		}
+		my $avg = $total / $count;
+		print "$service\:\t".&to_time($avg)."\n";
+	}
+} else {
+	if ($detailed) {
+		$sql = "SELECT * FROM times";
+		$stmt = $db->prepare($sql) or die $DBI::errstr;;
+		$stmt->execute() or die $DBI::errstr;
+		while (my @row = $stmt->fetchrow_array()) {
+			my $rec_time = localtime($row[1]);
+			my $start = localtime($row[4]);
+			my $finish = localtime($row[5]);
+			print <<EoS;
+
+ID:				$row[0]
+RECORD TIME:			$rec_time
+SCRIPT:				$row[2]
+SCRIPT ARGS:			$row[3]
+START:				$start
+END:				$finish
+EoS
+
+			print "DURATION:\t\t\t".&to_time($row[6])."\n";
+			print "ATOM AVERAGE:\t\t\t".sprintf("%-.4f", $row[7])." seconds \n";
+		}
+		$stmt->finish();
+	} else {
+		$sql = "SELECT DISTINCT service FROM found;";
+		$stmt = $db->prepare($sql) or die $DBI::errstr;
+		$stmt->execute() or die $DBI::errstr;
+		while (my @row = $stmt->fetchrow_array()) {
+			push @services, $row[0];
+		}
+		$stmt->finish();
+	
+		foreach my $svc ( sort @services ) {
+			$sql = "SELECT diff FROM times WHERE script_args='$svc'";
+			$stmt = $db->prepare($sql) or die $DBI::errstr;
+			$stmt->execute() or die $DBI::errstr;
+			my $count = 0; my $total = 0;
+			while (my @row = $stmt->fetchrow_array()) {
+				$total += $row[0];
+				$count++;
+			}
+			if ($count == 0) {
+				if ($chart) { print "$svc\:0 secs\n"; } 
+				else { print "$svc\:\t".&to_time(0)."\n"; }
+			} else {
+				my $avg = $total / $count;
+				#printf "%15s: %-.4f \n", $svc, $avg;
+				if ($chart) { print "$svc\:".sprintf("%-.2f", $avg)." secs\n"; } 
+				else { print "$svc\:\t".&to_time($avg)."\n"; }
+			}
+		}
+	}
+}
+$db->disconnect();
+
+###############################################################################
+# Subs
+###############################################################################
+sub usage {
+	print <<END;
+
+$0 [-h|--help] [-v|--verbose] [-d|--detailed] [-s|--service] <service name>
+
+Where:
+
+***FIX ME***
+
+END
+	exit 0;
+}
+
+sub to_time {
+	my $secs = shift(@_);
+	#if ($secs >= 86400) { 
+	#	die colored("[!] to_time: Seconds more than 1 day! ($secs)\n", "bold red"); 
+	#}
+	my $format_str = "";
+	my $days = 0; my $remainder = 0;
+	if ($secs >= 86400) {
+		if ($verbose) {
+			print "Total seconds: $secs \n";
+			print "Num days: ".($secs / 86400)." \n";
+			print "Modulus days: ".($secs % 86400)." \n";
+		}
+		$days = floor($secs / 86400);
+		$remainder = $secs % 86400;
+		
+		$format_str = "$days days, ".strftime("\%H:\%M:\%S", gmtime($secs));
+	} else {
+		$format_str = strftime("\%H:\%M:\%S", gmtime($secs));
+	}
+	return $format_str;
+}

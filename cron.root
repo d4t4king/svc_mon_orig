@@ -1,0 +1,46 @@
+# Edit this file to introduce tasks to be run by cron.
+# 
+# Each task to run has to be defined through a single line
+# indicating with different fields when the task will be run
+# and what command to run for the task
+# 
+# To define the time you can provide concrete values for
+# minute (m), hour (h), day of month (dom), month (mon),
+# and day of week (dow) or use '*' in these fields (for 'any').# 
+# Notice that tasks will be started based on the cron's system
+# daemon's notion of time and timezones.
+# 
+# Output of the crontab jobs (including errors) is sent through
+# email to the user the crontab file belongs to (unless redirected).
+# 
+# For example, you can run a backup of all your user accounts
+# at 5 a.m every week with:
+# 0 5 * * 1 tar -zcf /var/backups/home.tgz /home/
+# 
+# For more information see the manual pages of crontab(5) and cron(8)
+# 
+# m h  dom mon dow   command
+56 23 * * 5 /opt/crons/update-nmap.sh > /dev/null 2>&1
+49 23 * * 5 /opt/crons/update-masscan.sh > /dev/null 2>&1
+### Start Scan Schedule
+0 0 * * 6,0 /opt/service_monitor/scan 10 ftp > /dev/null 2>&1
+0 1 * * 6,0 /opt/service_monitor/scan 172 ftp > /dev/null 2>&1
+0 2 * * 6,0 /opt/service_monitor/scan 10 http > /dev/null 2>&1
+0 4 * * 6,0 /opt/service_monitor/scan 172 http > /dev/null 2>&1
+0 6 * * 6,0 /opt/service_monitor/scan 10 mssql > /dev/null 2>&1
+0 7 * * 6,0 /opt/service_monitor/scan 172 mssql > /dev/null 2>&1
+0 8 * * 6,0 /opt/service_monitor/scan 10 rdp > /dev/null 2>&1
+0 9 * * 6,0 /opt/service_monitor/scan 172 rdp > /dev/null 2>&1
+0 10 * * 6,0 /opt/service_monitor/scan 10 rsh > /dev/null 2>&1
+0 11 * * 6,0 /opt/service_monitor/scan 172 rsh > /dev/null 2>&1
+0 12 * * 6,0 /opt/service_monitor/scan 10 smtp > /dev/null 2>&1
+0 13 * * 6,0 /opt/service_monitor/scan 172 smtp > /dev/null 2>&1
+0 14 * * 6,0 /opt/service_monitor/scan 10 ssh > /dev/null 2>&1
+0 15 * * 6,0 /opt/service_monitor/scan 172 ssh > /dev/null 2>&1
+0 16 * * 6,6 /opt/service_monitor/scan 10 telnet > /dev/null 2>&1
+0 17 * * 6,0 /opt/service_monitor/scan 172 telnet > /dev/null 2>&1
+0 18 * * 6,0 /opt/service_monitor/scan 10 vnc > /dev/null 2>&1
+0 19 * * 6,0 /opt/service_monitor/scan 172 vnc > /dev/null 2>&1
+0 20 * * 6,0 /opt/service_monitor/scan 10 vpn > /dev/null 2>&1
+0 21 * * 6,0 /opt/service_monitor/scan 172 vpn > /dev/null 2>&1
+59 21 * * 6,0,1 /opt/service_monitor/store > /opt/crons/logs/store.cron.log 2>&1

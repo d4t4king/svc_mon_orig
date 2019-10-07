@@ -1,0 +1,228 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use DBI;
+use File::Find;
+use XML::Simple;
+use Data::Dumper;
+use Getopt::Long;
+use Net::Nslookup;
+use File::Basename;
+use Term::ANSIColor;
+
+my $working_dir = "/opt/service_monitor";
+
+BEGIN {
+	push @INC, "/opt/service_monitor";
+}
+use SEuMail;
+
+open PID, ">/tmp/store.pid.run" or die colored("Couldn't open PID file: $! \n", "bold red");
+print PID "$$\n";
+close PID or die colored("Couldn't close PID file: $! \n", "bold red");
+
+chdir($working_dir);
+
+our $verbose = 0;
+
+GetOptions(
+	'v|verbose+'	=>	\$verbose,
+);
+
+my %to_bool = ( "0"	=>	"false", "1"	=>	"true");
+my @services = ('ftp', 'http', 'https', 'mssql', 'mysql', 'rdp', 'rsh', 'smtp', 'ssh', 'telnet', 'vnc', 'vpn');
+my %services_ports = (
+	'ftp'		=>	'21',
+	'http'		=>	'80',
+	'https'		=>	'443',
+	'mssql'		=>	'1433',
+	'mysql'		=>	'3306',
+	'rdp'		=>	'3389',
+	'rsh'		=>	'514',
+	'smtp'		=>	'25',
+	'ssh'		=>	'22',
+	'telnet'	=>	'23',
+	'vnc'		=>	'5900',
+	'vpn'		=>	'1723'
+);
+
+our $now_i = time();
+our $last_24 = $now_i - (48 * 3600);
+our @files_2_process = ();
+our $database = 'stores.db';
+
+my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "");
+
+find(\&wanted, $working_dir);
+
+#print Dumper(\@files_2_process);
+
+print "Found ".scalar(@files_2_process)." files to process.\n" if ($verbose);
+
+foreach my $file ( @files_2_process ) {
+	print colored("Processing file: $file.... \n", "cyan") if ($verbose);
+	my ($name, $path, $ext) = fileparse($file, "xml");
+	my ($f_net, $f_svc, $f_date) = split(/\_/, $name);
+	my $ref = XMLin($file);
+	#print Dumper($ref);
+	if (ref($ref->{'host'}) eq 'ARRAY') {
+		print STDERR colored("ARRAY\n", "green") if ($verbose > 1);
+		foreach my $host ( @{$ref->{'host'}} ) {
+			#print Dumper($host);
+			print "=============================================================\n" if ($verbose > 1);
+			print "A: $f_svc, $host->{'address'}{'addr'}\n" if ($verbose > 1);
+			if (&db_host_exist($host->{'address'}{'addr'})) {
+				print colored("$host->{'address'}{'addr'}: Host exists!\n", "green");
+				if (&db_host_service($host->{'address'}{'addr'}, $f_svc)) {
+					my $val = &db_host_update_found($host->{'address'}{'addr'}, $f_svc);
+					print STDERR colored("Return Value: $to_bool{$val} \n", "yellow") if ($verbose > 1);
+				} else {
+					print colored("Host exists, but service is new: ($host->{'address'}{'addr'}, $f_svc) \n", "bold yellow");
+					#SEuMail::send_new_host_service_found("cheselton\@semprautilities.com", "no-reply-found\@semprautilities.com", $host->{'address'}{'addr'}, $f_svc);
+					&db_add_host($host->{'address'}{'addr'}, $f_svc, $host->{'endtime'});
+				}
+			} else {
+				print colored("This host needs to be added. ($host->{'address'}{'addr'})\n", "bold yellow");
+				#SEuMail::send_new_host_found("cheselton\@semprautilities.com", "no-reply-found\@semprautilities.com", $host->{'address'}{'addr'}, $f_svc);
+				#&db_add_host($host->{'address'}{'addr'}, $f_svc, $f_date);
+				&db_add_host($host->{'address'}{'addr'}, $f_svc, $host->{'endtime'});
+			}
+		}
+	} elsif (ref($ref->{'host'}) eq 'HASH') {
+		print STDERR colored("HASH\n", "green") if ($verbose > 1);
+		#foreach my $host ( keys %{$ref->{'host'}} ) {
+			#print Dumper($ref);
+			print "=============================================================\n" if ($verbose > 1);
+			print "H: $f_svc, $ref->{'host'}{'address'}{'addr'}\n" if ($verbose > 1);
+			if (&db_host_exist($ref->{'host'}{'address'}{'addr'}, $f_svc)) {
+				print colored("$ref->{'host'}{'address'}{'addr'}: Host exists!\n", "green");
+				if (&db_host_service($ref->{'host'}{'address'}{'addr'}, $f_svc)) {
+					my $val = &db_host_update_found($ref->{'host'}{'address'}{'addr'}, $f_svc);
+					print STDERR colored("Return Value: $to_bool{$val} \n", "yellow") if ($verbose > 1);
+				} else {
+					print colored("Host exists, but service is new: ($ref->{'host'}{'address'}{'addr'}, $f_svc) \n", "bold yellow");
+					#SEuMail::send_new_host_service_found("cheselton\@semprautilities.com", "no-reply-found\@semprautilities.com", $ref->{'host'}{'address'}{'addr'}, $f_svc);
+					&db_add_host($ref->{'host'}{'address'}{'addr'}, $f_svc, $ref->{'host'}{'endtime'});
+				}
+			} else {
+				print colored("This host needs to be added. ($ref->{'host'}{'address'}{'addr'}) \n", "yellow");
+				#SEuMail::send_new_host_found("cheselton\@semprautilities.com", "no-reply-found\@semprautilities.com", $ref->{'host'}{'address'}{'addr'}, $f_svc);
+				&db_add_host($ref->{'host'}{'address'}{'addr'}, $f_svc, $ref->{'host'}{'endtime'});
+				#&db_add_host($host->{'address'}{'addr'}, $f_svc, $host->{'endtime'});
+			}
+		#}
+	} else {
+		my $r = ref($ref->{'host'});
+		print STDERR colored("Unexpected reference type: $r \n", "red");
+	}
+	#last;
+}
+
+END {
+	unlink("/tmp/store.pid.run") or die colored("Couldn't delete PID file: $! \n", "bold red");
+}
+
+###############################################################################
+### Subroutines
+###############################################################################
+sub wanted() {
+	if ($File::Find::name =~ /\.xml$/) {
+		my ($name, $ext) = split(/\./);
+		#print STDERR colored("Name: $name \n", "red");
+		my ($f_net, $f_svc, $f_date) = split(/\_/, $name);
+		#print STDERR colored("f_date: $f_date \n", "magenta");
+		if (($f_date <= $now_i) && ($f_date >= $last_24)) {
+			push @files_2_process, $File::Find::name;
+		}
+	}
+}
+
+sub db_host_update_found() {
+	my $host = shift(@_);
+	my $svc = shift(@_);
+	$host = trim($host);
+	print STDERR colored("db_host_update_found() HOST: $host \n", "cyan") if ($verbose);
+	my $time = time();
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr; 
+	my $sql = "UPDATE found SET last_found='$time',current_found='$time' WHERE ip_addr='$host' and service='$svc';";
+	my $sth = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $sth->execute() or die $DBI::errstr;
+	print STDERR colored("RTV: $rtv \n", "red") if ($verbose > 1);
+	return 1;		# return true, unless there's an error
+					# work out how to identify errors later
+					# maybe $DBI::err ??
+}
+
+sub db_host_service() {
+	my $host = shift(@_);
+	my $svc = shift(@_);
+	$host = trim($host);
+	print STDERR colored("db_host_service() HOST: $host : SERVICE: $svc \n", "cyan") if ($verbose);
+	my $id = '';
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $sql = "SELECT id FROM found WHERE ip_addr='$host' and service='$svc'";
+	my $sth = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $sth->execute or die $DBI::errstr;
+	print STDERR colored("RTV: $rtv \n", "red") if ($verbose > 1);
+	while (my @row = $sth->fetchrow_array()) {
+		print STDERR Dumper(\@row) if ($verbose > 1);
+		$id = $row[0];
+	}
+	$sth->finish or die $DBI::errstr;
+	$db->disconnect;
+	$id = trim($id);
+	print STDERR colored("db_host_service() ID: $id \n", "cyan") if ($verbose);
+	if ((defined($id)) && ($id ne '') && ($id =~ /\d+/)) {
+		return 1;			# true
+	} else {
+		return 0; 			# false
+	}
+}
+
+sub db_host_exist() {
+	my $host = shift(@_);
+	$host = trim($host);
+	print STDERR colored("db_host_exist() HOST: $host \n", "cyan") if ($verbose);
+	my $id = '';
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $sql = "SELECT id FROM found WHERE ip_addr='$host'";
+	my $sth = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $sth->execute or die $DBI::errstr;
+	print STDERR colored("RTV: $rtv \n", "red") if ($verbose > 1);
+	while (my @row = $sth->fetchrow_array()) {
+		print STDERR Dumper(\@row) if ($verbose > 1);
+		$id = $row[0];
+	}
+	$db->disconnect();
+	$id = trim($id);
+	print STDERR colored("db_host_exist() ID: $id \n", "cyan") if ($verbose);
+	if ((defined($id)) && ($id ne '') && ($id =~ /\d+/)) {
+		return 1;		# true
+	} else {
+		return 0; 		# false
+	}
+}
+
+sub db_add_host() {
+	my $host = shift(@_);
+	my $svc = shift(@_);
+	my $endtime = shift(@_);
+	my $hostname = nslookup('host'=>$host, 'type'=>'PTR');
+	$hostname = 'UNRESOLVED' if ((!defined($hostname)) || ($hostname eq ''));
+	print STDERR colored("Hostname: $hostname \n", "red") if ($verbose);
+	my $banner = 'foo';
+	$banner = `/usr/bin/nmap -sC -p $services_ports{$svc} --script banner $host | grep "|_banner:" | sed -e 's/|_banner: //g'`;
+	chomp($banner);
+	$banner =~ s/\'/''/g;
+	print STDERR colored("Banner: $banner \n", "magenta") if ($verbose);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $sql = "INSERT INTO found ('service', 'ip_addr', 'hostname', 'first_found', 'last_found', 'current_found', 'banner') VALUES ('$svc', '$host', '$hostname', '$endtime', '$endtime', '$endtime', '$banner')";
+	print STDERR colored("$sql\n", "yellow") if ($verbose > 1);
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $stmt->execute() or die $DBI::errstr;
+	return $rtv;
+}
+
+sub trim { my $s = shift(@_); $s =~ s/^\s+|\s+$//g; return $s; }

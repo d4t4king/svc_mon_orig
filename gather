@@ -1,0 +1,218 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use feature qw( switch );
+no warnings 'experimental::smartmatch';
+use Term::ANSIColor;
+use Data::Dumper;
+use DBI;
+use Logger::Syslog;
+use Getopt::Long qw( :config no_ignore_case bundling );
+use Benchmark;
+
+my $working_dir = "/opt/service_monitor";
+BEGIN {
+	push @INC, "/opt/service_monitor";
+}
+use SEuMail;
+
+my ($help, $verbose);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+);
+
+my %bench_track;
+
+open PID,">/tmp/gather.run.pid" or die colored("Unable to write to PID run file in /tmp/! $!", "bold red");
+print PID "$$\n";
+close PID or die colored("Couldn't close PID file! $!", "bold red");
+
+my %protos = (
+	'ftp'		=> '21',
+	'http'		=>	'80',
+	'https'		=>	'443',
+	'mssql'		=>	'1433',
+	'mysql'		=>	'3306',
+	'pclpjl'	=>	'9100',
+	'rdp'		=>	'3389',
+	'rsh'		=>	'514',
+	'smtp'		=>	'25',
+	'ssh'		=>	'22',
+	'telnet'	=>	'23',
+	'vnc'		=>	'5900',
+	'vpn'		=>	'1741',
+);
+
+logger_prefix("gather-scan: ");
+notice("Gather script started.");
+
+my $start_time = new Benchmark;
+
+my $proto = $ARGV[0];
+unless ((defined($proto)) && ($proto ne '')) {
+	die colored("[EE] You must specify a protocol to gather information on.", "bold red");
+	error("Protocol not specified.");
+}
+chomp($proto);
+unless ($proto =~ /(?:ftp|http|https|mssql|mysql|pclpjl|rdp|rsh|smtp|ssh|telnet|vnc|vpn)/) {
+	die colored("[EE] Protocol not yet supported: ($proto)", "bold red");
+	error("protocol not yet supported.");
+}
+my @found = &sql_get_array("$working_dir/stores.db", "SELECT DISTINCT ip_addr FROM found WHERE service='$proto';");
+my $nmap = "/opt/nmap/nmap";
+
+my $i =  scalar(@found);
+my $total = $i;
+print colored("[**] $i total targets to scan. \n", "bold yellow");
+foreach my $h ( @found ) {
+	$bench_track{$h}{'start'} = new Benchmark;
+	print colored("$i of $total \n", "bold yellow");
+	my $GATHER_CMD = "$nmap -sT -Pn -p $protos{$proto}";
+	print colored("[--] $GATHER_CMD --script banner $h \n", "bold green");
+	info("[--] $GATHER_CMD --script banner $h");
+	my $b = `$GATHER_CMD --script banner $h 2>&1 | grep 'banner' | cut -d: -f2-`;
+	chomp($b); $b = &trim($b);
+	$b =~ s/\'//g;
+	print colored("[**] Got banner: $b \n", "cyan");
+	info("[**] Got banner: $b ");
+	my $dbb = &sql_get_scalar("$working_dir/stores.db", "SELECT banner FROM found WHERE ip_addr='$h' AND service='$proto'");
+	print colored("[**] Got DB banner: $dbb \n", "cyan");
+	info("[**] Got DB banner: $dbb ");
+	if (defined($b)) {
+		if (($b ne $dbb) && ($dbb !~ /^\s*$/)) {
+			warn colored("[!!] Database banner different than what I just grabbed! \n", "bold yellow");
+			warning("[!!] Database banner is different that collected banner.");
+			#SEuMail::send_banner_updated("cheselton\@semprautilities.com", "auto-sender\@is-vmsrbn-p13.sempra.com", "$h", "$dbb", "$b");
+			my $rtv = &sql_update_table("$working_dir/stores.db", "UPDATE found SET banner='$b' WHERE ip_addr='$h' and service='$proto'");
+		} elsif ($b eq $dbb) {
+			print colored("[**] Grabbed banner matches database banner.  Skipping. \n", "cyan");
+			info("[**] Grabbed banner matches database banner.  Not updating.");
+		} else {
+			$b =~ s/'//g;
+			my $rtv = &sql_update_table("$working_dir/stores.db", "UPDATE found SET banner='$b' WHERE ip_addr='$h' and service='$proto'");
+		}
+	} else {
+		warn colored("[!!] Didn't get a banner, or banner is blank. \n", "bold yellow");
+		warning("[!!] Didn't get a banner, or banner is blank, ");
+	}		
+	#last if $i >= 5;
+	#$i++;
+	if ($proto =~ /https?/) {
+		$GATHER_CMD = "$nmap -sT -Pn -p $protos{$proto} --script http-title $h";
+		print colored("[--] $GATHER_CMD \n", "bold green");
+		my $t = `$GATHER_CMD 2>&1 | grep 'http-title:' | cut -d: -f2-`;
+		if ((!defined($t)) || ($t eq '')) { $t = "&nbsp;"; }
+		chomp($t); $t = &trim($t);
+		print colored("[**] Got http-title: $t \n", "cyan");
+		my $dbt = &sql_get_scalar("$working_dir/stores.db", "SELECT title FROM found WHERE ip_addr='$h' AND service='$proto'");
+		if ((!defined($dbt)) || ($dbt eq '')) { $dbt =~ "&nbsp;"; }
+		print colored("[**] Got DB http-title: $dbt \n", "cyan");
+		if (defined($t)) {
+			if (($t ne $dbt) && ($dbt !~ /^\s*$/)) {
+				warn colored("[!!] Database title different than what I just grabbed! \n", "bold yellow");
+				warning("[!!] Database title different than what I just grabbed! ");
+			} elsif ($t eq $dbt) {
+				print colored("[**] Grabbed title matches database title. skipping. \n", "cyan");
+				info("[**] Grabbed title matches database title.  Skipping.");
+			} else {
+				$t =~ s/'//g;
+				# OLD: We don't want all the backslashes in the DB if we can avoid it.
+				#my $rtv = &sql_update_table("stores.db", "UPDATE found SET title='".quotemeta($t)."' WHERE ip_addr='$h' AND service='$proto'") or die colored("There was a problem updating the table: $! \n", "bold red");
+				my $rtv = &sql_update_table("stores.db", "UPDATE found SET title='$t' WHERE ip_addr='$h' AND service='$proto'") or die colored("There was a problem updating the table: $!", "bold red");
+			}
+		} else {
+			warn colored("[!!] Didn't get a title, or title is blank. \n", "bold yellow");
+			warning("[!!] Didn't get a title, or title is blank.");
+		}
+		$GATHER_CMD = "$nmap -sT -Pn -p $protos{$proto} --script http-php-version $h";
+		print colored("[--] $GATHER_CMD \n", "bold green");
+		system("$GATHER_CMD 2>&1");
+	}
+	$bench_track{$h}{'end'} = new Benchmark;
+	$i--;
+}
+
+my $end_time = new Benchmark;
+
+my $avg_total = 0;
+foreach my $h ( keys %bench_track ) {
+	my $diff = timediff($bench_track{$h}{'end'}, $bench_track{$h}{'start'});
+	$avg_total += $diff->real;
+}
+my $atom_avg = $avg_total / scalar(keys(%bench_track));
+my $difference = timediff($end_time, $start_time);
+
+if (($verbose) && ($verbose > 1)) {
+	print colored("START: ".$start_time->real." \n", "bold white on_blue");
+	print colored("END: ".$end_time->real." \n", "bold white on_blue");
+	print colored("DIFF: ".$difference->real." \n", "bold white on_blue");
+	print colored("AVG CHECK: ".sprintf("%-.4f", $atom_avg)."\n", "bold white on_blue");
+}
+
+print colored("It took ".timestr($difference)." \n", "green") if ($verbose);
+
+my $script = $0;
+$script =~ s/^\.\///;
+
+my $time_sql = "INSERT INTO times (datetime,script_name,script_args,start_time,end_time,diff,avg_atom_time) VALUES ('".time()."','$script','".join("|",@ARGV)."','".$start_time->real."','".$end_time->real."','".$difference->real."','$atom_avg')";
+print colored("$time_sql", "magenta") if ($verbose);
+&sql_update_table("stores.db", $time_sql);
+
+unlink("/tmp/gather.run.pid") or die colored("Unable to delete PID file: $!", "bold red");
+
+###############################################################################
+### Subroutines
+###############################################################################
+sub trim() {
+	my $string = shift(@_);
+	$string =~ s/^\s+|\s+$//g;
+	return $string;
+}
+
+sub sql_get_scalar() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "");
+	my $stmt = $db->prepare($sql);
+	$stmt->execute() or die $DBI::errstr;
+	my $s;
+	while (my @row = $stmt->fetchrow_array()) {
+		$s = $row[0];
+	}
+	$stmt->finish() or die $DBI::errstr;
+	$db->disconnect() or die $DBI::errstr;
+	if (defined($s)) { return $s; }
+	else { return undef; }
+}
+
+sub sql_get_array() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	$stmt->execute() or die $DBI::errstr;
+	my @results;
+	while (my @row = $stmt->fetchrow_array()) {
+		push @results, $row[0];
+	}
+	$stmt->finish() or die $DBI::errstr;
+	$db->disconnect() or die $DBI::errstr;
+	if (scalar(@results) >= 0) { return @results; }
+	else { return undef; }
+}
+
+sub sql_update_table() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	print STDERR colored("$sql \n", "magenta");
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = 0;
+	$rtv = $stmt->execute() or die $DBI::errstr;
+	print STDERR colored("RTV: $rtv \n", "yellow");
+	return $rtv;
+}
+	

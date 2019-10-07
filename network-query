@@ -1,0 +1,146 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+use Term::ANSIColor;
+use Getopt::Long qw( :config no_ignore_case bundling );
+use Data::Dumper;
+use DBI;
+use feature qw( switch );
+no warnings "experimental::smartmatch";
+use Net::IPv4Addr qw( ipv4_in_network );
+
+my ($help,$verbose,$database,$csv,$network);
+my ($base_ip, $cidr_mask, $net_stub);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+	'd|database=s'	=>	\$database,
+	'n|network=s'	=>	\$network,
+);
+
+$help = 0 unless ($help);
+if ($help) { my $r = &usage(); exit $r; }
+
+if ((!defined($network)) or ($network eq "")) {
+	warn colored("Must specify a network to query using the -n option!", "bold red");
+	my $r = &usage();
+	exit $r;
+}
+
+$database = '/opt/service_monitor/stores.db' unless ((defined($database)) and ($database ne ""));
+if ($network =~ /((?:\d+\.){3}\d+)\/(\d{1,2})/) {
+	$base_ip = $1; $cidr_mask = $2;
+	print STDERR colored("IP: $base_ip CIDR: $cidr_mask \n", "bold cyan") if ($verbose);
+} else {	
+	die colored("Network doesn't look like a proper network definition ($network). \n", "bold red");
+}
+
+if ($verbose) {
+	print STDERR color("bold cyan");
+	print STDERR <<END;
+HELP:		$help
+VERBOSE		$verbose
+DATABASE:	$database
+NETWORK:	$network
+CSV:		$csv
+
+BASE IP:	$base_ip
+CIDR_MASK:	$cidr_mask
+
+END
+	print STDERR color("RESET");
+}
+
+given ($cidr_mask) {
+	when ($cidr_mask >= 24) {
+		if ($base_ip =~ /((?:\d+\.){3})\d+/) {
+			$net_stub = $1;
+		} else {
+			die ("Unexpected network format: $base_ip \n", "bold red");
+		}
+	}
+	when (($cidr_mask < 24) and ($cidr_mask >= 16)) {
+		if ($base_ip =~ /((?:\d+\.){2})\d+\.\d+/) {
+			$net_stub = $1;
+		} else {
+			die ("Unexpected network format: $base_ip \n", "bold red");
+		}
+	}
+	when (($cidr_mask < 16) and ($cidr_mask >= 8)) {
+		if ($base_ip =~ /(\d+)\.(?:\d+\.){2}\d+/) {
+			$net_stub = $1;
+		} else {
+			die ("Unexpected network format: $base_ip \n", "bold red");
+		}
+	}
+	default { die colored("We should never get here. \n", "bold red"); }
+}
+
+print STDERR colored("NET STUB:\t$net_stub\n", "bold cyan") if ($verbose);
+
+my $db = DBI->connect("dbi:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+my ($stm, $rtv, $sql);
+#$sql = "PRAGMA column_info(found)";
+#$stm = $db->prepare($sql) or die $DBI::errstr;
+#$rtv = $stm->execute() or die $DBI::errstr;
+#while (my @row = $stm->fetchrow_array()) {
+#	print "@row\n";
+#}
+#$stm->finish();
+
+$sql = "SELECT * FROM found WHERE ip_addr like '".$net_stub."%'";
+$stm = $db->prepare($sql) or die $DBI::errstr;
+$rtv = $stm->execute() or die $DBI::errstr;
+print "id,service,ip_addr,hostname,first_found,last_found,current_found,banner,html_title\n";
+while (my @row = $stm->fetchrow_array()) {
+	#print Dumper(\@row) if ($verbose);
+	#@row = map { (!defined($_)) ? ($_ = "") : (); } @row;
+	$row[4] = &to_datetime_s($row[4]);
+	$row[5] = &to_datetime_s($row[5]);
+	$row[6] = &to_datetime_s($row[6]);
+	$row[8] = "" if (!defined($row[8]));
+	if (ipv4_in_network($network, $row[2])) {
+		print join(",", @row)."\n";
+	}
+}
+$stm->finish();
+$db->disconnect();
+
+###############################################################################
+# Subs
+###############################################################################
+sub to_datetime_s {
+	my $s = shift(@_);
+	my @p = localtime($s);
+	my ($y,$m,$d,$H,$M,$S);
+	$y = $p[5] + 1900;
+	$m = $p[4] + 1;
+	$d = $p[3];
+	$H = $p[2] < 10 ? "0$p[2]" : $p[2];
+	$M = $p[1] < 10 ? "0$p[1]" : $p[1];
+	$S = $p[0] < 10 ? "0$p[0]" : $p[0];
+	return "$y-$m-$d $H:$M:$S";
+}
+
+sub usage {
+	print <<END;
+
+$0 -h|--help -v|--verbose -d|--database -n|--network
+
+-h|--help			Displays this useful message.
+-v|--verbose			Displays more verbose output.  This is usually for 
+				debugging, but might contain interesting information
+				for the user.
+-n|--network			Required!  Specifies the network you would like to collect
+				information about.
+-d|--database			Default: stores.db (the masscan database).  It is likely 
+				that, unless the specified database has the exact same
+				schema as the stores.db SQLite3 database, this script
+				will fail.  Use only if you REALLY know what you're
+				doing.
+				
+END
+	return 1;
+}

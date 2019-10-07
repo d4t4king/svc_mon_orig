@@ -1,0 +1,183 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+use Getopt::Long qw( :config no_ignore_case bundling );
+use Term::ANSIColor;
+use Data::Dumper;
+use DBI;
+
+BEGIN {
+	push @INC, '.';
+}
+use HTTPMeta::Record;
+
+my %to_bool = (0 => 'false', 1 => 'true');			# I really wish perl had a true boolean
+my ($help,$verbose,$dbfile);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+	'd|dbfile=s'	=>	\$dbfile,
+);
+
+&usage if ($help);
+
+my $curl_cmd = '/usr/bin/curl --connect-timeout 10 -retry 1 --retry-max-time 10';
+
+$dbfile = 'stores.db' unless ((defined($dbfile)) and ($dbfile ne ""));
+
+my %existing_hosts = &get_hosts($dbfile);
+
+print Dumper(\%existing_hosts);
+
+#exit 1;
+
+my @hosts = &getsql_string_array($dbfile, "SELECT DISTINCT ip_addr FROM found WHERE service='http';");
+
+#print Dumper(\@hosts);
+
+#exit 1;
+
+foreach my $h ( sort @hosts ) {
+	print "H: $h \n";
+	my $pstr = '';
+	my $title = `$curl_cmd http://$h/ 2>&1 | egrep -i '<title>'`;
+	chomp($title);
+	$title =~ s/.*\<title\>(.*?)\<\/title\>.*/$1/i;
+	$title = &trim($title);
+	if ($verbose) {
+		if ((!defined($title)) or ($title eq "")) {
+			if ($verbose > 1) {
+				warn colored("No title in HTML!", "yellow");
+				print STDOUT colored("|$title|\n", "magenta");
+			}
+		} else {
+			$pstr = "$h: T:$title ";
+		}
+	}
+	my $svr = `$curl_cmd --head http://$h/ 2>&1 | egrep "Server:"`;
+	chomp($svr);
+	$svr =~ s/Server\:\s*(.*?)/$1/;
+	$svr = &trim($svr);
+	if ($verbose) {
+		if ((!defined($svr)) or ($svr eq "")) {
+			if ($verbose > 1) {
+				warn colored("No server header!", "yellow");
+				print STDOUT colored("|$svr|\n", "magenta");
+			}
+		} else {
+			$pstr .= "S:$svr";
+		}
+	}
+	print "$pstr\n" if ($verbose);
+	my $time = time();
+	$title =~ s/'/''/g;
+	$svr =~ s/'/''/g;
+	my $insert_sql = "INSERT INTO http_meta (ip_addr, server_header, header_first_found, header_last_updated, html_title, title_first_found, title_last_updated) VALUES ('$h','$svr','$time','$time','$title','$time','$time');\n";
+	if (((!defined($svr)) or ($svr eq "")) and
+		((!defined($title)) or ($title eq ""))) {
+		print "Skipping record with blank entries! \n" if ($verbose);
+		next;										# skip records with no title AND no server header
+	} else {
+		print "$insert_sql :";
+		my $rtv = &putsql($dbfile, $insert_sql);
+		print colored("$rtv \n", "bold magenta");
+	}
+}
+###############################################################################
+# Subs
+###############################################################################
+sub usage {
+	print <<END;
+
+$0 [-h|--help] [-v|--verbose] [-d|--dbfile] <dbname>
+
+Where:
+
+-h|--help			Displays this useful message.
+-v|--verbose		Increase the level of output.  Use multiple times for more verbosity.
+-d|--dbfile			Specifies the DB file to use.
+
+END
+
+	exit 1;
+}
+
+sub trim { my $s = shift(@_); $s =~ s/^\s+|\s+$//g; return $s; }
+
+sub get_hosts {
+	my %e_hosts;
+
+	my $dbfile = shift(@_);
+	my $db = DBI->connect("dbi:SQLite:dbname=$dbfile", "", "") or die $DBI::errstr;
+	my $sql = "SELECT DISTINCT id,ip_addr FROM http_meta";
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $stmt->execute or die $DBI::errstr;
+	print STDOUT colored("RTV: $rtv \n", "bold yellow");
+	while (my @row = $stmt->fetchrow_array()) {
+		$e_hosts{$row[0]} = HTTPMeta::Record->new($row[0], $row[1]) unless (exists($e_hosts{$row[0]}{$row[1]}));
+	}
+	$stmt->finish or die $DBI::errstr;
+	$db->disconnect or die $DBI::errstr;
+
+	return %e_hosts;
+}
+
+sub getsql_single_string {
+	my $str		= "";
+	my $dbfile	= shift(@_);	
+	my $sql		= shift(@_);
+
+	my $db		= DBI->connect("dbi:SQLite:dbname=$dbfile", "", "") or die $DBI::errstr;
+	my $stmt	= $db->prepare($sql) or die $DBI::errstr;
+	my $rtv		= $stmt->execute() or die $DBI::errstr;
+	print STDOUT colored("RTV: $rtv \n", "bold yellow");
+	while (my @row = $stmt->fetchrow_array()) {
+		if ((defined($row[0])) and ($row[0] ne '')) {
+			$str = $row[0];
+		} else {
+			warn colored("Item not found in database! \n", "bold yellow");
+		}
+	}
+	$stmt->finish or die $DBI::errstr;
+	$db->disconnect or die $DBI::errstr;
+
+	return $str;
+}
+
+sub getsql_string_array {
+	my @arr		= ();
+	my $dbfile	= shift(@_);	
+	my $sql		= shift(@_);
+
+	my $db		= DBI->connect("dbi:SQLite:dbname=$dbfile", "", "") or die $DBI::errstr;
+	my $stmt	= $db->prepare($sql) or die $DBI::errstr;
+	my $rtv		= $stmt->execute() or die $DBI::errstr;
+	print STDOUT colored("RTV: $rtv \n", "bold yellow");
+	while (my @row = $stmt->fetchrow_array()) {
+		if ((defined($row[0])) and ($row[0] ne '')) {
+			push @arr, $row[0];
+		} else {
+			warn colored("Item not found in database! \n", "bold yellow");
+		}
+	}
+	$stmt->finish or die $DBI::errstr;
+	$db->disconnect or die $DBI::errstr;
+
+	return @arr;
+}
+
+sub putsql {
+	my $dbfile	= shift(@_);	
+	my $sql		= shift(@_);
+
+	my $db		= DBI->connect("dbi:SQLite:dbname=$dbfile", "", "") or die $DBI::errstr;
+	my $stmt	= $db->prepare($sql) or die $DBI::errstr;
+	my $rtv		= $stmt->execute() or die $DBI::errstr;
+	print STDOUT colored("RTV: $rtv \n", "bold yellow");
+	$stmt->finish or die $DBI::errstr;
+	$db->disconnect or die $DBI::errstr;
+
+	return $rtv;
+}

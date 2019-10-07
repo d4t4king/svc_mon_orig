@@ -1,0 +1,74 @@
+#!/usr/bin/env ruby
+
+require 'rubygems'
+require 'colorize'
+require 'getoptlong'
+require 'nokogiri'
+require 'pp'
+
+opts = GetoptLong.new(
+	[ '--help', '-h', GetoptLong::NO_ARGUMENT ],
+	[ '--nmap-list', GetoptLong::NO_ARGUMENT ],
+	[ '--eyewitness-list', GetoptLong::NO_ARGUMENT ],
+	[ '--sort', '-S', GetoptLong::NO_ARGUMENT ],
+	[ '--in', '-i', GetoptLong::REQUIRED_ARGUMENT ],
+)
+
+listout = false
+ew_list = false
+sorted = false
+input = ''
+
+def usage() 
+	print <<-EoS
+
+#{$0} [-h|--help] [-i|--in] <input file> [--nmap-list] [--eyewitness-list]
+
+-h|--help			Display this useful message.
+-i|--in				Specify the input file to process.
+--nmap-list			Output a raw list of actionable IPs for nmap to process.
+--eyewitness-list		Output a list of IP addresses for Eyewitness to process.
+
+	EoS
+
+	exit 1
+end
+
+opts.each do |opt,arg|
+	case opt
+	when '--help'
+		usage()
+	when '--sort'
+		sorted = true
+	when '--nmap-list'
+		listout = true
+	when '--eyewitness-list'
+		listout = true
+		ew_list = true
+	when '--in'
+		input = arg
+	end
+end
+
+if listout
+	if input.nil? || !File.exists?(input) || File.zero?(input)
+		raise "There was a problem with the input file.  It wasn't specified, doesn't exist, or is zero bytes."
+	else
+		xdoc = Nokogiri::XML(File.open(input))
+		hosts = xdoc.xpath("//host/address")
+		hosts.to_a.sort_by! {|ip| ip.to_s.split('.').map{ |octet| octet.to_i } } if sorted
+		hosts.each do |h|
+			if ew_list
+				puts "http://#{h['addr']}/"
+			else
+				puts h["addr"]
+			end
+			#puts "==========================================================================="
+		end
+	end
+else
+	puts "No action specified.".magenta
+	puts
+	usage()
+end
+

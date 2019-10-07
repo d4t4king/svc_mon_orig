@@ -1,0 +1,389 @@
+#! /usr/bin/perl -w
+
+###############################################################################
+# Set us up some pragmas
+###############################################################################
+use strict;
+use warnings;
+use feature qw( switch );
+no warnings "experimental::smartmatch";
+###############################################################################
+# import the modules we need
+###############################################################################
+use Term::ANSIColor;
+use Data::Dumper;
+use DBI;
+use Getopt::Long;
+use Logger::Syslog;
+###############################################################################
+# Main configuration section
+# set us up some variables, handle arguments, etc.
+###############################################################################
+my $working_dir = "/opt/service_monitor";
+#BEGIN {
+#	push @INC, $working_dir;
+#}
+use lib '/opt/service_monitor';
+use SEuMail;
+
+my ($help, $verbose, $target);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+	't|target=s'	=>	\$target,
+);
+
+my $nmap = "/opt/nmap/nmap";
+my %svc_ports = (
+	'ftp'		=>	'21',
+	'http'		=>	'80,8000,8080',
+	'https'		=>	'443,8443',
+	'mssql'		=>	'1433',
+	'rdp'		=>	'3389',
+	'rsh'		=>	'514',
+	'smtp'		=>	'25',
+	'ssh'		=>	'22',
+	'telnet'	=>	'23',
+	'vnc'		=>	'5800,5900-5910',
+	'vpn'		=>	'1721',
+);
+
+BEGIN {
+	logger_prefix("masscan-vuln-module: ");
+	info("Started vuln-module. ");
+}
+my ($host_ip);
+###############################################################################
+if ((defined($target)) && ($target ne '')) {
+	$host_ip = $target;
+} else {
+	$host_ip = &get_rand_host();
+}
+print colored("[**] Got host ip $host_ip. \n", "cyan");
+info("[**] Got host ip $host_ip. ");
+my @host_svcs = &sql_get_array("$working_dir/stores.db", "SELECT DISTINCT service FROM found WHERE ip_addr='$host_ip' ORDER BY service");
+print colored("[**] Found ".scalar(@host_svcs)." service(s) on the host. \n", "cyan");
+info("[**] Found ".scalar(@host_svcs)." service(s) on the host. ");
+###############################################################################
+# print out all of the discovered services
+###############################################################################
+foreach my $s ( @host_svcs ) { print "[**] \t$s\n"; }
+###############################################################################
+# loop through the discovered services and process
+###############################################################################
+foreach my $s ( @host_svcs ) {
+	given ($s) {
+###############################################################################
+# FTP
+###############################################################################
+		when (/ftp/) {
+			print colored("[**] Processing FTP service on $host_ip ....\n", "bold green");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script ftp-anon --script ftp-bounce $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} --script ftp-anon --script ftp-bounce $host_ip 2>&1/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# HTTP
+###############################################################################
+		when (/^http$/) {
+			print colored("[**] Processing HTTP service on $host_ip ....\n", "bold green");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip 2>&1/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# HTTPS
+###############################################################################
+		when (/https/) {
+			print colored("[**] Processing HTTPS service on $host_ip ....\n", "bold green");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip 2>&1/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1; 
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			}
+			$out = `$nmap -sT -Pn -p $svc_ports{$s} --script ssl-ccs-injection $host_ip 2>&1 | awk '/ssl-ccs-injection/ { getline; print \$0 }'`;
+			if ($out =~ /VULNERABLE:/) {
+				my $utime = time();
+				# need to check for vulns in db
+				print colored("[==] INSERT INTO vulns (service,port_num,proto,host_id,first_found,last_found,current_found,nmap_script_name,vuln_name,notified,fixed) VALUES ('$s','443','tcp','".&get_host_id($host_ip)."','$utime','$utime','$utime','ssl-ccs-injection','MTIM CCS Injection','0','0') \n","magenta");
+				my $rtv = &insert_or_update_record("$working_dir/stores.db","INSERT INTO vulns (service,port_num,proto,host_id,first_found,last_found,current_found,nmap_script_name,vuln_name,notified,fixed) VALUES ('$s','443','tcp','".&get_host_id($host_ip)."','$utime','$utime','$utime','ssl-ccs-injection','MTIM CCS Injection','0','0')");
+				print colored("[==] Insert RTV: $rtv \n", "magenta");
+			}
+			$out = `$nmap -sT -Pn -p $svc_ports{$s} --script sslv2 $host_ip 2>&1 | awk '/sslv2/ { getline; print \$0 }'`;
+			chomp($out);
+			if ($out =~ /SSLv2 supported/) {
+				my $utime = time();
+				# need to check for vulns in db
+				print colored("[==] INSERT INTO vulns (service,port_num,proto,host_id,first_found,last_found,current_found,nmap_script_name,vuln_name,notififed,fixed) VALUES ('$s','443','tcp','".&get_host_id($host_ip)."','$utime','$utime','$utime','sslv2','SSLv2','0','0') \n", "magenta");
+				my $rtv = &insert_or_update_record("$working_dir/stores.db", "INSERT INTO vulns (service,port_num,proto,host_id,first_found,last_found,current_found,nmap_script_name,vuln_name,notififed,fixed) VALUES ('$s','443','tcp','".&get_host_id($host_ip)."','$utime','$utime','$utime','sslv2','SSLv2','0','0')");
+				print colored("[==] Insert RTV: $rtv \n", "magenta");
+			}
+		}
+###############################################################################
+# MSSQL
+###############################################################################
+		when (/mssql/) {
+			print colored("[''] Processing MSSQL service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script ms-sql-xp-cmdshell $host_ip");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script ms-sql-info $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# RDP
+###############################################################################
+		when (/rdp/) {
+			print colored("[''] Processing RDP service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script rdp-vuln-ms12-020 --script rdp-enum-encryption $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# RSH
+###############################################################################
+		when (/rsh/) {
+			print colored("[''] Processing RSH service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# SMTP
+###############################################################################
+		when (/smtp/) {
+			print colored("[''] Processing SMTP service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script smtp-enum-users $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# SSH
+###############################################################################
+		when (/ssh/) {
+			print colored("[''] Processing SSH service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script ssh2-enum-algos --script sshv1 $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# TELNET
+###############################################################################
+		when (/telnet/) {
+			print colored("[''] Processing TELNET service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script telnet-brute --script-args userdb=$working_dir/telnet.users.lst,passdb=$working_dir/telnet.passwd.lst,telnet-brute.timeout=10s --script telnet-ntlm-info $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# VNC
+###############################################################################
+		when (/vnc/) {
+			print colored("[**] Processing VNC service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			#system("$nmap -sT -Pn -p $svc_ports{$s} --script vnc-info $host_ip");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+###############################################################################
+# VPN
+###############################################################################
+		when (/vpn/) {
+			print colored("[''] Processing VPN service PLACEHOLDER on $host_ip ....\n", "bold yellow");
+			my $out = qx/$nmap -sT -Pn -p $svc_ports{$s} $host_ip/;
+			chomp($out);
+			if ($out =~ /(\d{1,5}\/(?:tcp|udp)\s+(?:open|filtered|open\|filtered|closed)\s+.*)/m) {
+				my $sstr = $1;
+				my $rtv = &update_service_status($s, $host_ip, $sstr);
+				print "[>>] Update service status RTV: $rtv \n";
+			} else {
+				die colored("Couldn't match service/port line! \n$out\n", "bold red");
+			}
+		}
+		default { 
+			print colored("[**] ScarJo is a sexy mamma! \n", "cyan");
+			info("[**] ScarJo is a sexy mamma! \n");
+		}
+	}
+}
+
+END {
+	info("End vuln-module. ");
+}
+###############################################################################
+### Subroutines
+###############################################################################
+###############################################################################
+# returns a random host ID from the database
+###############################################################################
+sub get_rand_host() {
+	my $max_id = &get_max_id();
+	unless (defined($max_id)) {
+		die colored("There was a problem getting the last host ID from the database: $! \n", "bold red");
+	}
+	my $h = &sql_get_scalar("$working_dir/stores.db", "SELECT ip_addr FROM found WHERE id='".int(rand($max_id))."';'");
+	if ((defined($h)) && ($h ne '')) { return $h; }
+	else { return undef; }
+}
+
+###############################################################################
+# gets the max host ID from the database
+###############################################################################
+sub get_max_id() {
+	return &sql_get_scalar("$working_dir/stores.db", 'SELECT MAX(id) FROM found;');
+}
+
+###############################################################################
+# takes an IP address and returns the host ID from the database
+###############################################################################
+sub get_host_id() {
+	my $ip = shift(@_);
+	return &sql_get_scalar("$working_dir/stores.db", "SELECT id FROM found WHERE ip_addr='$ip';");
+}
+
+###############################################################################
+# takes a dataqbase (file) name and SQL statement.
+# returns a scalar reponse from the database
+# returns undef if search/query returns no results
+###############################################################################
+sub sql_get_scalar() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	$stmt->execute() or die $DBI::errstr;
+	my $s;
+	while (my @row = $stmt->fetchrow_array()) {
+		$s = $row[0];
+	}
+	$stmt->finish() or die $DBI::errstr;
+	$db->disconnect() or die $DBI::errstr;
+	if (defined($s)) { return $s; } 
+	else { return undef; }
+}
+
+###############################################################################
+# takes a dataqbase (file) name and SQL statement.
+# returns an array reponse from the database
+# returns undef if search/query returns no results
+###############################################################################
+sub sql_get_array() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	$stmt->execute() or die $DBI::errstr;
+	my @s;
+	while (my @row = $stmt->fetchrow_array()) {
+		push @s, $row[0];
+	}
+	$stmt->finish() or die $DBI::errstr;
+	$db->disconnect() or die $DBI::errstr;
+	if (scalar(@s) != 0) { return @s; } 
+	else { return undef; }
+}
+
+###############################################################################
+# takes a database (file) name and SQL statement
+# returns the return value from the database execute
+###############################################################################
+sub insert_or_update_record() {
+	my $database = shift(@_);
+	my $sql = shift(@_);
+	my $db = DBI->connect("DBI:SQLite:dbname=$database", "", "") or die $DBI::errstr;
+	my $stmt = $db->prepare($sql) or die $DBI::errstr;
+	my $rtv = $stmt->execute() or die $DBI::errstr;
+	$stmt->finish() or die $DBI::errstr;
+	$db->disconnect() or die $DBI::errstr;
+	return $rtv;
+}
+
+###############################################################################
+# takes the string input and returns the rtv of the update
+###############################################################################
+sub update_service_status() {
+	my ($svc, $ip, $stat_str) = @_;
+	if ($stat_str =~ /\d{1,5}\/(?:tcp|udp)\s+(open|filtered|open\|filtered|closed)\s+.*/m) {
+		my $status = $1;
+		my $curr_status = &sql_get_scalar("$working_dir/stores.db", "SELECT DISTINCT service_status FROM found WHERE ip_addr='$ip' AND service='$svc'");
+		if ((defined($curr_status)) and ($curr_status ne $status)) {
+			my $time = time();
+			my $sql = "UPDATE found SET service_status='$status',current_found='$time',last_found='$time' WHERE service='$svc' AND ip_addr='$ip'";
+			my $rtv = &insert_or_update_record("$working_dir/stores.db", $sql);
+			return $rtv;
+		} elsif ((!defined($curr_status)) or ($curr_status eq "")) {
+			my $time = time();
+			my $sql = "UPDATE found SET service_status='$status',current_found='$time',last_found='$time' WHERE service='$svc' AND ip_addr='$ip'";
+			my $rtv = &insert_or_update_record("$working_dir/stores.db", $sql);
+			return $rtv;
+		} elsif ((defined($curr_status)) and ($curr_status eq $status)) {
+			return "0E0";
+		} else {
+			die colored("Couldn't get existing status for host and service from database! \n|$curr_status|$status|\n", "bold red");
+		}
+	} else {
+		die colored("Unrecognized status! $stat_str \n", "bold red");
+	}
+}

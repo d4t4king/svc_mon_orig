@@ -1,0 +1,61 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+
+use Term::ANSIColor;
+use Data::Dumper;
+use File::Basename;
+use Date::Calc qw( Localtime Delta_Days Today );;
+
+my @dirs = qw( ftp http https mssql mysql rdp rsh smtp ssh telnet vnc vpn );
+my @suffixes = qw( .xml .xz );
+my $done_archived = 0;
+my $now_archived = 0;
+
+foreach my $dir ( sort @dirs ) {
+	opendir DIR, $dir or die colored("Couldn't open $dir: $!", "bold red");
+	while (my $file = readdir(DIR)) {
+		# skip dot dirs
+		next if ($file =~ /^\.\.?$/);
+		my ($name,$path,$suffix) = fileparse("$dir/$file", @suffixes);
+		# set owner to charlie, group to staff and mode to 0644
+		&fix_perms("$dir/$file");
+		if ($suffix eq ".xz") {
+			print colored("[A]: $dir/$file \n", "green");
+		} else {
+			# if older than 30 days, archive it
+			if (&is_archive_age("$dir/$file")) {
+				print colored("[F]: $dir/$file ($name $path $suffix)\n", "yellow");
+				my $errs = system("xz -9 $dir/$file");
+				if ($errs == 0) {
+					print colored("\r[A]: $dir/$file ($name $path $suffix)\n", "green");
+				} else {
+					print colored("\r[A]: $dir/$file ($name $path $suffix)\n", "red");
+				}
+			} else {
+				print colored("[F]: $dir/$file ($name $path $suffix)\n", "cyan");
+			}
+		}
+	}
+	closedir DIR;
+}
+
+sub fix_perms {
+	my $dirfile = shift;
+	my ($fmode,$fuid,$fgid) = (stat($dirfile))[2,4,5];
+	my $frwx = sprintf("%04o", $fmode & 07777);
+	if ($fuid != 1000) { system("sudo chown charlie $dirfile"); }
+	if ($fgid != 50) { system("sudo chgrp staff $dirfile"); }
+	if ($frwx != 0644) { system("sudo chmod 0644 $dirfile"); }
+}
+
+sub is_archive_age {
+	my $dirfile = shift;
+	my $mtime = (stat("$dirfile"))[9];
+	my ($ly,$lm,$ld,$lH,$lM,$lS,$ldoy,$ldow,$ldst) = Localtime($mtime);
+	my $time = time(); my ($ty,$tm,$td) = Today($time);
+	my $Dd = Delta_Days($ly,$lm,$ld,$ty,$tm,$td);
+	if ($Dd >= 30) { return 1; }
+	else { return 0; }
+}

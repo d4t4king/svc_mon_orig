@@ -1,0 +1,110 @@
+#!/usr/bin/perl -w
+
+use strict;
+use warnings;
+use Term::ANSIColor;
+use Data::Dumper;
+use Getopt::Long;
+use DBI;
+use Date::Calc qw( Today_and_Now Time_to_Date );
+use Net::IPv4Addr qw( ipv4_in_network );
+
+my ($help, $verbose, $dbname);
+$verbose = 0;
+GetOptions(
+	'h|help'		=>	\$help,
+	'v|verbose+'	=>	\$verbose,
+	'd|dbname=s'	=>	\$dbname,
+);
+$dbname = "/opt/service_monitor/stores.db" unless ((defined($dbname)) && ($dbname ne ''));
+
+my (%service_counts,%network_counts,%banner_counts);
+
+my $db = DBI->connect("DBI:SQLite:dbname=$dbname", "", "") or die $DBI::errstr;
+my $sql = "SELECT service,COUNT(DISTINCT id) FROM found GROUP BY service ORDER BY COUNT(DISTINCT id) DESC";
+my $stmt = $db->prepare($sql) or die $DBI::errstr;
+my $rtv = $stmt->execute() or die $DBI::errstr;
+while (my @row = $stmt->fetchrow_array()) {
+	$service_counts{$row[0]} = $row[1];
+}
+$stmt->finish or die $DBI::errstr;
+
+$sql = "SELECT DISTINCT ip_addr FROM found";
+$stmt = $db->prepare($sql) or die $DBI::errstr;
+$rtv = $stmt->execute() or die $DBI::errstr;
+while (my @row = $stmt->fetchrow_array()) {
+	if ( ipv4_in_network("10.0.0.0/8", $row[0]) ) {
+		$network_counts{"10"}++;
+	} elsif ( ipv4_in_network("172.16.0.0/12", $row[0]) ) {
+		$network_counts{"172"}++;
+	} else {
+		warn "Unrecognized network: $row[0] \n" if (($verbose) && ($verbose > 1));
+		$network_counts{"unk"}++;
+	}
+}
+$stmt->finish or die $DBI::errstr;
+
+$sql = "SELECT service,banner,COUNT(DISTINCT id) FROM found GROUP BY service,banner";
+$stmt = $db->prepare($sql) or die $DBI::errstr;;
+$rtv = $stmt->execute() or die $DBI::errstr;
+while (my @row = $stmt->fetchrow_array()) {
+	$banner_counts{$row[0]}{$row[1]} = $row[2];
+}
+$stmt->finish or die $DBI::errstr;
+	
+
+###############################################################################
+# print the results
+###############################################################################
+print "**************************************************\n";
+printf "%-15s %-9s \n", "Service", "Count";
+print "**************************************************\n";
+foreach my $s ( sort { $service_counts{$b} <=> $service_counts{$a} } keys %service_counts ) {
+	printf "%-15s %-9d \n", $s, $service_counts{$s};
+}
+
+print "**************************************************\n";
+printf "%-15s %-9s \n", "Network", "Count";
+print "**************************************************\n";
+foreach my $n ( sort keys %network_counts ) {
+	printf "%-15s %-9d \n", $n, $network_counts{$n};
+}
+
+print "**************************************************\n";
+printf "%-15s %-45s %-9s \n", "Service", "Banner", "Count";
+print "**************************************************\n";
+foreach my $s ( sort keys %banner_counts ) {
+	foreach my $B ( sort { $banner_counts{$s}{$b} <=> $banner_counts{$s}{$a} } keys %{$banner_counts{$s}} ) {
+		printf "%-15s %-45s %-9d \n", $s, $B, $banner_counts{$s}{$B};
+	}
+}
+ 
+exit 0;
+###############################################################################
+# Dump the DB
+###############################################################################
+
+$sql = "SELECT * FROM found";
+$stmt = $db->prepare($sql) or die $DBI::errstr;
+$rtv = $stmt->execute();
+print "id,service,ip_addr,hostname,first_found,last_found,current_found,banner,title\n";
+while (my @row = $stmt->fetchrow_array()) {
+	$row[8] = " " unless ((defined($row[8])) && ($row[8] ne ''));
+	my $now = time();
+	#print "4: $row[4] | $now \n";
+	print "$row[0],$row[1],$row[2],$row[3],".&to_datestring(int($row[4])).",".&to_datestring($row[5]).",".&to_datestring($row[6]).",$row[7],$row[8]\n";
+}
+$stmt->finish or die $DBI::errstr;
+
+$db->disconnect or die $DBI::errstr;
+
+###############################################################################
+#  Subs
+###############################################################################
+sub to_datestring {
+	my $epoch = shift(@_);
+	die colored("Unexpected date string length: ".length($epoch)."\n", "bold red") if (length($epoch) != 10);
+	my ($y,$m,$d,$h,$M,$s) = Time_to_Date($epoch);
+	my $datestr = "$y-$m-$d $h:$M:$s.000";
+	return $datestr;
+}
